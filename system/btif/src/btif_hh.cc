@@ -45,7 +45,6 @@
 #include "main/shim/dumpsys.h"
 #include "os/log.h"
 #include "osi/include/allocator.h"
-#include "osi/include/properties.h"
 #include "stack/include/acl_api.h"
 #include "stack/include/bt_hdr.h"
 #include "stack/include/bt_uuid16.h"
@@ -697,14 +696,6 @@ void btif_hh_remove_device(const tAclLinkSpec& link_spec) {
   /* Remove all connections instances related to link_spec. If AUTO transport is
    * used, btif_hh_find_dev_by_link_spec() finds both HID and HOGP instances */
   while ((p_dev = btif_hh_find_dev_by_link_spec(link_spec)) != NULL) {
-    /* need to notify up-layer device is disconnected to avoid state out of sync
-     * with up-layer */
-
-    do_in_jni_thread(base::Bind(
-        [](tAclLinkSpec link_spec) {
-          BTHH_STATE_UPDATE(link_spec, BTHH_CONN_STATE_DISCONNECTED);
-        },
-        link_spec));
 
     if (btif_hh_cb.device_num > 0) {
       btif_hh_cb.device_num--;
@@ -715,6 +706,14 @@ void btif_hh_remove_device(const tAclLinkSpec& link_spec) {
     p_dev->dev_status = BTHH_CONN_STATE_UNKNOWN;
     p_dev->dev_handle = BTA_HH_INVALID_HANDLE;
     p_dev->uhid.ready_for_data = false;
+    /* need to notify up-layer device is disconnected to avoid state out of sync
+     * with up-layer */
+
+    do_in_jni_thread(base::Bind(
+        [](tAclLinkSpec link_spec) {
+          BTHH_STATE_UPDATE(link_spec, BTHH_CONN_STATE_DISCONNECTED);
+        },
+         p_dev->link_spec));
   }
 }
 
@@ -995,8 +994,6 @@ void btif_hh_getreport(btif_hh_uhid_t* p_uhid, bthh_report_type_t r_type,
 static void btif_hh_upstreams_evt(uint16_t event, char* p_param) {
   tBTA_HH* p_data = (tBTA_HH*)p_param;
   btif_hh_device_t* p_dev = NULL;
-  bool pts_hid_vup_enabled =
-  osi_property_get_bool("persist.vendor.bluetooth.pts_hid_vup_enabled", false);
 
   log::verbose("event={} dereg = {}", bta_hh_event_text(event),
                btif_hh_cb.service_dereg_active);
@@ -1088,8 +1085,9 @@ static void btif_hh_upstreams_evt(uint16_t event, char* p_param) {
       p_dev = btif_hh_find_connected_dev_by_handle(p_data->hs_data.handle);
       if (p_dev) {
         BT_HDR* hdr = p_data->hs_data.rsp_data.p_rpt_data;
+        tBTA_HH_STATUS status = p_data->hs_data.status;
 
-        if (hdr) { /* Get report response */
+        if (status == BTA_HH_OK && hdr) { /* Get report response */
           uint8_t* data = (uint8_t*)(hdr + 1) + hdr->offset;
           uint16_t len = hdr->len;
           HAL_CBACK(bt_hh_callbacks, get_report_cb,
@@ -1329,7 +1327,7 @@ static void btif_hh_upstreams_evt(uint16_t event, char* p_param) {
       log::verbose("--Removing HID bond");
       /* If it is locally initiated VUP or remote device has its major COD as
       Peripheral removed the bond.*/
-      if ((p_dev->local_vup || check_cod_hid(&(p_dev->link_spec.addrt.bda))) && !pts_hid_vup_enabled) {
+      if (p_dev->local_vup || check_cod_hid(&(p_dev->link_spec.addrt.bda))) {
         p_dev->local_vup = false;
         BTA_DmRemoveDevice(p_dev->link_spec.addrt.bda);
       } else {
